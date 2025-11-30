@@ -203,4 +203,3 @@ with tab2:
                 st.error(f"Error during analysis: {e}")
         else:
             st.error("Could not detect a person in the image.")
-```
