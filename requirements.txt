@@ -1,7 +1,13 @@
 streamlit
+
 mediapipe
+
 opencv-python-headless
+
 scikit-learn
+
 joblib
-numpy
+
+numpy<2.0.0
+
 Pillow
