@@ -6,12 +6,12 @@ import joblib
 from PIL import Image
 import av
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
-from collections import deque  # 부드러운 판정을 위한 큐
+from collections import deque
 
 # --- Page Configuration ---
 st.set_page_config(page_title="AI Real-time Posture Correction", page_icon="🐢")
 
-# 스타일 설정 (텍스트 색상 등)
+# 스타일 설정
 st.markdown("""
     <style>
     .big-font { font-size:24px !important; font-weight: bold; }
@@ -36,31 +36,50 @@ def load_model():
 model = load_model()
 mp_pose = mp.solutions.pose
 
+# --- Helper Function: Adjust Probabilities ---
+def adjust_probabilities(probs, classes):
+    """
+    Severe 확률을 낮추고 Good 확률을 높여주는 보정 함수
+    """
+    prob_dict = {cls: p for cls, p in zip(classes, probs)}
+    
+    # Severe 확률에 0.7을 곱해 낮춤 (너무 민감하지 않게)
+    if 'severe' in prob_dict:
+        prob_dict['severe'] *= 0.7
+    
+    # Mild 확률도 약간 조정 (선택 사항)
+    # if 'mild' in prob_dict:
+    #     prob_dict['mild'] *= 0.9
+
+    # 줄어든 확률만큼 다시 정규화 (합이 1이 되도록)
+    total = sum(prob_dict.values())
+    if total > 0:
+        for cls in prob_dict:
+            prob_dict[cls] /= total
+            
+    # 확률을 기준으로 다시 정렬된 클래스 예측
+    # (가장 높은 확률을 가진 클래스를 새로운 예측값으로 설정)
+    new_pred = max(prob_dict, key=prob_dict.get)
+            
+    return prob_dict, new_pred
+
 # --- Real-time Video Processing Class ---
 class VideoProcessor(VideoTransformerBase):
     def __init__(self):
         self.pose = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5, model_complexity=1)
         self.model = model
-        
-        # 결과 공유 변수
         self.latest_probs = {'good': 0, 'mild': 0, 'severe': 0}
         self.latest_pred = None
-        
-        # [핵심] 최근 10프레임의 확률을 저장하여 평균을 냄 (떨림 방지)
         self.history = deque(maxlen=10)
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        
-        # 1. Image Processing
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = self.pose.process(img_rgb)
 
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
-            
             try:
-                # 2. Feature Extraction
                 l_sh = landmarks[11]; r_sh = landmarks[12]
                 center_x = (l_sh.x + r_sh.x) / 2
                 center_y = (l_sh.y + r_sh.y) / 2
@@ -69,7 +88,6 @@ class VideoProcessor(VideoTransformerBase):
 
                 indices = [0, 2, 5, 7, 8, 11, 12]
                 features = []
-                
                 h, w, _ = img.shape
                 draw_points = []
 
@@ -80,25 +98,21 @@ class VideoProcessor(VideoTransformerBase):
                     features.extend([norm_x, norm_y])
                     draw_points.append((int(lm.x * w), int(lm.y * h)))
 
-                # 3. Prediction with Smoothing (보정 기능)
                 if self.model:
-                    # 현재 프레임의 확률 계산
+                    # 1. 모델 예측
                     current_probs = self.model.predict_proba([features])[0]
                     self.history.append(current_probs)
                     
-                    # 최근 10프레임의 평균 확률 계산 (이게 핵심!)
+                    # 2. 평균 계산 (Smoothing)
                     avg_probs = np.mean(self.history, axis=0)
-                    
                     classes = self.model.classes_
-                    # 가장 높은 평균 확률을 가진 클래스 선택
-                    pred_idx = np.argmax(avg_probs)
-                    final_pred = classes[pred_idx]
                     
-                    # UI 공유용 변수 업데이트
-                    self.latest_probs = {cls: p for cls, p in zip(classes, avg_probs)}
+                    # 3. [수정됨] 확률 보정 (Severe 낮추기)
+                    final_prob_dict, final_pred = adjust_probabilities(avg_probs, classes)
+                    
+                    self.latest_probs = final_prob_dict
                     self.latest_pred = final_pred
                     
-                    # 4. 화면에 점 찍기
                     for px, py in draw_points:
                         cv2.circle(img, (px, py), 5, (0, 255, 0), -1)
                     
@@ -110,15 +124,13 @@ class VideoProcessor(VideoTransformerBase):
 # --- Main Tab Configuration ---
 tab1, tab2 = st.tabs(["📷 Real-time Analysis", "🖼️ Upload Photo"])
 
-# Tab 1: Real-time with External UI
+# Tab 1: Real-time
 with tab1:
     st.header("Real-time Webcam")
-    
     if model is None:
         st.error("Model file (posture_model.pkl) is missing.")
     else:
         col1, col2 = st.columns([2, 1])
-        
         with col1:
             ctx = webrtc_streamer(
                 key="posture-check",
@@ -128,7 +140,6 @@ with tab1:
                 rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
                 async_processing=True
             )
-
         with col2:
             st.subheader("Live Status")
             status_text_ph = st.empty()
@@ -168,11 +179,10 @@ with tab1:
                             """, unsafe_allow_html=True)
                         else:
                             warning_ph.empty()
-                    
                 import time
                 time.sleep(0.1)
 
-# Tab 2: Upload (Same as before)
+# Tab 2: Upload
 with tab2:
     st.header("File Upload Diagnosis")
     uploaded_file = st.file_uploader("Choose an image file", type=['jpg', 'jpeg', 'png'])
@@ -200,19 +210,20 @@ with tab2:
                     lm = landmarks[idx]
                     features.extend([(lm.x - center_x)/width, (lm.y - center_y)/width])
                 
-                probs = model.predict_proba([features])[0]
+                # [수정됨] 업로드 모드에서도 확률 보정 적용
+                raw_probs = model.predict_proba([features])[0]
                 classes = model.classes_
-                prob_dict = {cls: round(p * 100, 1) for cls, p in zip(classes, probs)}
+                
+                prob_dict, pred = adjust_probabilities(raw_probs, classes)
                 
                 st.subheader("Analysis Result")
-                st.write(f"**Good: {prob_dict.get('good', 0)}%**")
-                st.progress(int(prob_dict.get('good', 0)))
-                st.write(f"**Mild: {prob_dict.get('mild', 0)}%**")
-                st.progress(int(prob_dict.get('mild', 0)))
-                st.write(f"**Severe: {prob_dict.get('severe', 0)}%**")
-                st.progress(int(prob_dict.get('severe', 0)))
+                st.write(f"**Good: {int(prob_dict.get('good', 0)*100)}%**")
+                st.progress(int(prob_dict.get('good', 0)*100))
+                st.write(f"**Mild: {int(prob_dict.get('mild', 0)*100)}%**")
+                st.progress(int(prob_dict.get('mild', 0)*100))
+                st.write(f"**Severe: {int(prob_dict.get('severe', 0)*100)}%**")
+                st.progress(int(prob_dict.get('severe', 0)*100))
                 
-                pred = model.predict([features])[0]
                 if pred == 'severe':
                     st.error("🚨 WARNING: Severe Forward Head Posture detected!")
                 elif pred == 'mild':
@@ -223,3 +234,4 @@ with tab2:
                 st.error("Analysis failed.")
         else:
             st.error("Person not found.")
+
