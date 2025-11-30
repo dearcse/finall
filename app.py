@@ -6,6 +6,7 @@ import joblib
 from PIL import Image
 import av
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
+from collections import deque  # 부드러운 판정을 위한 큐
 
 # --- Page Configuration ---
 st.set_page_config(page_title="AI Real-time Posture Correction", page_icon="🐢")
@@ -36,14 +37,17 @@ model = load_model()
 mp_pose = mp.solutions.pose
 
 # --- Real-time Video Processing Class ---
-# (영상 처리에서는 오직 랜드마크 점만 찍고, 텍스트/바는 그리지 않음)
 class VideoProcessor(VideoTransformerBase):
     def __init__(self):
         self.pose = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5, model_complexity=1)
         self.model = model
-        # 결과 공유를 위한 변수 (Streamlit 메인 스레드와 통신용)
+        
+        # 결과 공유 변수
         self.latest_probs = {'good': 0, 'mild': 0, 'severe': 0}
         self.latest_pred = None
+        
+        # [핵심] 최근 10프레임의 확률을 저장하여 평균을 냄 (떨림 방지)
+        self.history = deque(maxlen=10)
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -66,7 +70,6 @@ class VideoProcessor(VideoTransformerBase):
                 indices = [0, 2, 5, 7, 8, 11, 12]
                 features = []
                 
-                # 좌표 저장 (그리기용)
                 h, w, _ = img.shape
                 draw_points = []
 
@@ -77,15 +80,25 @@ class VideoProcessor(VideoTransformerBase):
                     features.extend([norm_x, norm_y])
                     draw_points.append((int(lm.x * w), int(lm.y * h)))
 
-                # 3. Prediction (확률 계산하여 저장)
+                # 3. Prediction with Smoothing (보정 기능)
                 if self.model:
-                    probs = self.model.predict_proba([features])[0]
+                    # 현재 프레임의 확률 계산
+                    current_probs = self.model.predict_proba([features])[0]
+                    self.history.append(current_probs)
+                    
+                    # 최근 10프레임의 평균 확률 계산 (이게 핵심!)
+                    avg_probs = np.mean(self.history, axis=0)
+                    
                     classes = self.model.classes_
+                    # 가장 높은 평균 확률을 가진 클래스 선택
+                    pred_idx = np.argmax(avg_probs)
+                    final_pred = classes[pred_idx]
                     
-                    self.latest_probs = {cls: p for cls, p in zip(classes, probs)}
-                    self.latest_pred = self.model.predict([features])[0]
+                    # UI 공유용 변수 업데이트
+                    self.latest_probs = {cls: p for cls, p in zip(classes, avg_probs)}
+                    self.latest_pred = final_pred
                     
-                    # 4. 화면에는 '점'만 찍기 (텍스트 X)
+                    # 4. 화면에 점 찍기
                     for px, py in draw_points:
                         cv2.circle(img, (px, py), 5, (0, 255, 0), -1)
                     
@@ -104,11 +117,9 @@ with tab1:
     if model is None:
         st.error("Model file (posture_model.pkl) is missing.")
     else:
-        # Layout: 2 Columns (Left: Video, Right: Real-time Stats)
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            # WebRTC Streamer (Callback을 통해 데이터 공유)
             ctx = webrtc_streamer(
                 key="posture-check",
                 video_processor_factory=VideoProcessor,
@@ -120,18 +131,15 @@ with tab1:
 
         with col2:
             st.subheader("Live Status")
-            # 텅 빈 공간(Placeholder)을 미리 만들어두고 계속 업데이트
             status_text_ph = st.empty()
             bar_good_ph = st.empty()
             bar_mild_ph = st.empty()
             bar_severe_ph = st.empty()
             warning_ph = st.empty()
 
-        # 실시간 업데이트 루프
         if ctx.state.playing:
             while True:
                 if ctx.video_processor:
-                    # 프로세서에서 최신 확률값 가져오기
                     probs = ctx.video_processor.latest_probs
                     pred = ctx.video_processor.latest_pred
                     
@@ -140,7 +148,6 @@ with tab1:
                         p_mild = int(probs.get('mild', 0) * 100)
                         p_severe = int(probs.get('severe', 0) * 100)
 
-                        # 1. 텍스트 상태 표시
                         if pred == 'good':
                             status_text_ph.markdown(f"<p class='good-text'>Status: GOOD 😊</p>", unsafe_allow_html=True)
                         elif pred == 'mild':
@@ -148,12 +155,10 @@ with tab1:
                         else:
                             status_text_ph.markdown(f"<p class='severe-text'>Status: SEVERE 🐢</p>", unsafe_allow_html=True)
 
-                        # 2. 막대 그래프 업데이트 (Streamlit Progress Bar)
                         bar_good_ph.progress(p_good, text=f"Good: {p_good}%")
                         bar_mild_ph.progress(p_mild, text=f"Mild: {p_mild}%")
                         bar_severe_ph.progress(p_severe, text=f"Severe: {p_severe}%")
 
-                        # 3. 경고 메시지 (Severe일 때만 표시)
                         if pred == 'severe':
                             warning_ph.markdown("""
                                 <div class='warning-box'>
@@ -165,7 +170,7 @@ with tab1:
                             warning_ph.empty()
                     
                 import time
-                time.sleep(0.1)  # 과부하 방지 (0.1초마다 갱신)
+                time.sleep(0.1)
 
 # Tab 2: Upload (Same as before)
 with tab2:
@@ -176,7 +181,6 @@ with tab2:
         image = Image.open(uploaded_file)
         st.image(image, caption="Uploaded Image", use_column_width=True)
         
-        # Feature Extraction logic...
         img_np = np.array(image.convert('RGB'))
         pose_static = mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5, model_complexity=1)
         results = pose_static.process(img_np)
