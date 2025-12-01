@@ -143,9 +143,23 @@ with tab1:
         with col2:
             st.subheader("Live Status")
             status_text_ph = st.empty()
-            bar_good_ph = st.empty()
-            bar_mild_ph = st.empty()
-            bar_severe_ph = st.empty()
+            
+            # 3개의 Bar를 위한 공간 생성
+            st.write("**Prediction Confidence:**")
+            col_severe, col_mild, col_good = st.columns(3)
+            
+            with col_severe:
+                st.markdown("<p style='text-align: center; color: #e74c3c; font-weight: bold;'>Severe</p>", unsafe_allow_html=True)
+                bar_severe_ph = st.empty()
+            
+            with col_mild:
+                st.markdown("<p style='text-align: center; color: #f1c40f; font-weight: bold;'>Mild</p>", unsafe_allow_html=True)
+                bar_mild_ph = st.empty()
+                
+            with col_good:
+                st.markdown("<p style='text-align: center; color: #2ecc71; font-weight: bold;'>Good</p>", unsafe_allow_html=True)
+                bar_good_ph = st.empty()
+
             warning_ph = st.empty()
 
         if ctx.state.playing:
@@ -166,9 +180,14 @@ with tab1:
                         else:
                             status_text_ph.markdown(f"<p class='severe-text'>Status: SEVERE 🐢</p>", unsafe_allow_html=True)
 
-                        bar_good_ph.progress(p_good, text=f"Good: {p_good}%")
-                        bar_mild_ph.progress(p_mild, text=f"Mild: {p_mild}%")
-                        bar_severe_ph.progress(p_severe, text=f"Severe: {p_severe}%")
+                        # 3개의 Bar 업데이트 (세로형 Bar는 Streamlit 기본 기능으로 어려워 가로형 Bar 사용)
+                        # 또는 각 컬럼에 metric이나 progress bar 사용
+                        bar_severe_ph.progress(p_severe)
+                        bar_mild_ph.progress(p_mild)
+                        bar_good_ph.progress(p_good)
+                        
+                        # 텍스트로 퍼센트 표시 추가 (선택사항)
+                        # bar_severe_ph.metric("Severe", f"{p_severe}%") ...
 
                         if pred == 'severe':
                             warning_ph.markdown("""
@@ -217,13 +236,25 @@ with tab2:
                 prob_dict, pred = adjust_probabilities(raw_probs, classes)
                 
                 st.subheader("Analysis Result")
-                st.write(f"**Good: {int(prob_dict.get('good', 0)*100)}%**")
-                st.progress(int(prob_dict.get('good', 0)*100))
-                st.write(f"**Mild: {int(prob_dict.get('mild', 0)*100)}%**")
-                st.progress(int(prob_dict.get('mild', 0)*100))
-                st.write(f"**Severe: {int(prob_dict.get('severe', 0)*100)}%**")
-                st.progress(int(prob_dict.get('severe', 0)*100))
                 
+                # 3개의 Bar 표시 (업로드 탭)
+                col_u_severe, col_u_mild, col_u_good = st.columns(3)
+                
+                with col_u_severe:
+                    st.markdown("<p style='text-align: center; color: #e74c3c; font-weight: bold;'>Severe</p>", unsafe_allow_html=True)
+                    st.progress(int(prob_dict.get('severe', 0)*100))
+                    st.write(f"{int(prob_dict.get('severe', 0)*100)}%")
+                    
+                with col_u_mild:
+                    st.markdown("<p style='text-align: center; color: #f1c40f; font-weight: bold;'>Mild</p>", unsafe_allow_html=True)
+                    st.progress(int(prob_dict.get('mild', 0)*100))
+                    st.write(f"{int(prob_dict.get('mild', 0)*100)}%")
+                    
+                with col_u_good:
+                    st.markdown("<p style='text-align: center; color: #2ecc71; font-weight: bold;'>Good</p>", unsafe_allow_html=True)
+                    st.progress(int(prob_dict.get('good', 0)*100))
+                    st.write(f"{int(prob_dict.get('good', 0)*100)}%")
+
                 if pred == 'severe':
                     st.error("🚨 WARNING: Severe Forward Head Posture detected!")
                 elif pred == 'mild':
@@ -234,4 +265,3 @@ with tab2:
                 st.error("Analysis failed.")
         else:
             st.error("Person not found.")
-
