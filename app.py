@@ -102,7 +102,7 @@ def distance_to_probs(distance):
 
     # Tunable thresholds
     GOOD_MAX = 0.10   # below this → usually GOOD
-    MILD_MAX = 0.26   # above this → usually SEVERE
+    MILD_MAX = 0.24   # above this → usually SEVERE
 
     # 1) Very close to baseline → GOOD-dominant
     if d <= GOOD_MAX:
@@ -396,6 +396,7 @@ if ctx and ctx.state.playing:
                 sound_ph.empty()
 
         time.sleep(0.1)
+
 
 
 
