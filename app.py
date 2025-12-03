@@ -142,8 +142,8 @@ with tab1:
     else:
         col1, col2 = st.columns([2, 1])
         
+        # -------------------- LEFT SIDE (VIDEO) --------------------
         with col1:
-            # WebRTC Streamer
             ctx = webrtc_streamer(
                 key="posture-check",
                 video_processor_factory=VideoProcessor,
@@ -153,74 +153,89 @@ with tab1:
                 async_processing=True
             )
 
+        # -------------------- RIGHT SIDE (UI STATUS) --------------------
         with col2:
             st.subheader("Live Status")
             status_text_ph = st.empty()
             
             st.write("**Prediction Confidence:**")
             
-            # 3개의 column으로 나눠서 각자 bar placeholder 하나씩만 생성
+            # 3 columns for 3 bars
             col_good, col_mild, col_severe = st.columns(3)
 
-    with col_good:
-        st.markdown(
-            "<p style='text-align: center; color: #2ecc71; font-weight: bold;'>Good</p>",
-            unsafe_allow_html=True
-        )
-        bar_good_ph = st.empty()
+            with col_good:
+                st.markdown(
+                    "<p style='text-align: center; color: #2ecc71; font-weight: bold;'>Good</p>",
+                    unsafe_allow_html=True
+                )
+                bar_good_ph = st.empty()
 
-    with col_mild:
-        st.markdown(
-            "<p style='text-align: center; color: #f1c40f; font-weight: bold;'>Mild</p>",
-            unsafe_allow_html=True
-        )
-        bar_mild_ph = st.empty()
+            with col_mild:
+                st.markdown(
+                    "<p style='text-align: center; color: #f1c40f; font-weight: bold;'>Mild</p>",
+                    unsafe_allow_html=True
+                )
+                bar_mild_ph = st.empty()
 
-    with col_severe:
-        st.markdown(
-            "<p style='text-align: center; color: #e74c3c; font-weight: bold;'>Severe</p>",
-            unsafe_allow_html=True
-        )
-        bar_severe_ph = st.empty()
+            with col_severe:
+                st.markdown(
+                    "<p style='text-align: center; color: #e74c3c; font-weight: bold;'>Severe</p>",
+                    unsafe_allow_html=True
+                )
+                bar_severe_ph = st.empty()
 
-    # 경고 박스용 placeholder
-    warning_ph = st.empty()
+            warning_ph = st.empty()
 
+    # -------------------- LOOP (OUTSIDE col1/col2!) --------------------
+    if ctx.state.playing:
+        while True:
+            if ctx.video_processor:
+                probs = ctx.video_processor.latest_probs
+                pred = ctx.video_processor.latest_pred
 
-        if ctx.state.playing:
-            while True:
-                if ctx.video_processor:
-                    probs = ctx.video_processor.latest_probs
-                    pred = ctx.video_processor.latest_pred
-                    
-                    if pred:
-                        p_good = int(probs.get('good', 0) * 100)
-                        p_mild = int(probs.get('mild', 0) * 100)
-                        p_severe = int(probs.get('severe', 0) * 100)
+                if pred:
+                    p_good = int(probs.get('good', 0) * 100)
+                    p_mild = int(probs.get('mild', 0) * 100)
+                    p_severe = int(probs.get('severe', 0) * 100)
 
-                        if pred == 'good':
-                            status_text_ph.markdown(f"<p class='good-text'>Status: GOOD 😊</p>", unsafe_allow_html=True)
-                        elif pred == 'mild':
-                            status_text_ph.markdown(f"<p class='mild-text'>Status: MILD 😐</p>", unsafe_allow_html=True)
-                        else:
-                            status_text_ph.markdown(f"<p class='severe-text'>Status: SEVERE 🐢</p>", unsafe_allow_html=True)
+                    # Status Text
+                    if pred == 'good':
+                        status_text_ph.markdown(
+                            "<p class='good-text'>Status: GOOD 😊</p>",
+                            unsafe_allow_html=True
+                        )
+                    elif pred == 'mild':
+                        status_text_ph.markdown(
+                            "<p class='mild-text'>Status: MILD 😐</p>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        status_text_ph.markdown(
+                            "<p class='severe-text'>Status: SEVERE 🐢</p>",
+                            unsafe_allow_html=True
+                        )
 
-                        bar_good_ph.progress(p_good, text=f"Good: {p_good}%")
-                        bar_mild_ph.progress(p_mild, text=f"Mild: {p_mild}%")
-                        bar_severe_ph.progress(p_severe, text=f"Severe: {p_severe}%")
+                    # Progress bars
+                    bar_good_ph.progress(p_good, text=f"Good: {p_good}%")
+                    bar_mild_ph.progress(p_mild, text=f"Mild: {p_mild}%")
+                    bar_severe_ph.progress(p_severe, text=f"Severe: {p_severe}%")
 
-                        if pred == 'severe':
-                            warning_ph.markdown("""
-                                <div class='warning-box'>
-                                    🚨 <b>BAD POSTURE DETECTED!</b><br>
-                                    Please straighten your neck.
-                                </div>
-                            """, unsafe_allow_html=True)
-                        else:
-                            warning_ph.empty()
-                    
-                import time
-                time.sleep(0.1)
+                    # Warning box
+                    if pred == 'severe':
+                        warning_ph.markdown(
+                            """
+                            <div class='warning-box'>
+                                🚨 <b>BAD POSTURE DETECTED!</b><br>
+                                Please straighten your neck.
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        warning_ph.empty()
+
+            import time
+            time.sleep(0.1)
 
 # Tab 2: Upload
 with tab2:
@@ -286,6 +301,7 @@ with tab2:
                 st.error("Analysis failed.")
         else:
             st.error("Person not found.")
+
 
 
 
