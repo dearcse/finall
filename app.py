@@ -10,14 +10,44 @@ from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode, 
 # --- Page Configuration ---
 st.set_page_config(page_title="AI Posture Correction Pro", page_icon="🐢", layout="wide")
 
-# --- CSS & Audio Script ---
+# --- CSS & Audio / Voice Script ---
 def get_audio_html():
     js_code = """
         <script>
+        // Simple beep alert (for SEVERE)
         function playAlert() {
             var audio = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
             audio.volume = 0.5;
             audio.play();
+        }
+
+        // ---- Voice guidance using Web Speech API ----
+        window.lastPostureStatus = null;
+
+        function speakPostureStatus(status) {
+            if (!('speechSynthesis' in window)) return;
+
+            var text = '';
+            if (status === 'GOOD') {
+                text = 'Posture is good.';
+            } else if (status === 'MILD') {
+                text = 'Posture is mild. Please lift your head slightly and relax your shoulders.';
+            } else if (status === 'SEVERE') {
+                text = 'Posture is severe. Pull your chin back and open your chest.';
+            }
+            if (text === '') return;
+
+            var utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'en-US';
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(utterance);
+        }
+
+        // Called from Python when posture class changes
+        function updatePostureStatus(status) {
+            if (window.lastPostureStatus === status) return;
+            window.lastPostureStatus = status;
+            speakPostureStatus(status);
         }
         </script>
         <div id="audio-container"></div>
@@ -44,10 +74,6 @@ st.markdown("""
     @keyframes blink {
         50% { opacity: 0.5; }
     }
-    
-    .stProgress > div > div > div > div {
-        background-color: #2ecc71;
-    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -56,7 +82,7 @@ st.markdown(get_audio_html(), unsafe_allow_html=True)
 st.title("🐢 AI Posture Correction Pro")
 st.markdown(
     "Turn on your webcam to analyze your posture in real time. "
-    "**First, set your own best posture as the standard.**"
+    "**Set your own best upright posture as the personal standard.**"
 )
 
 mp_pose = mp.solutions.pose
@@ -259,14 +285,9 @@ with col_video:
 
 with col_info:
     st.subheader("Calibration")
-    st.markdown(
-        "1. Sit comfortably and create your **best upright posture**.<br>"
-        "2. Click the button below to save your current posture as the **standard**.",
-        unsafe_allow_html=True,
-    )
 
     calib_msg_ph = st.empty()
-    if st.button("📏 Set Current Posture as Standard"):
+    if st.button("📏 Set your best upright posture now!"):
         if ctx and ctx.video_processor:
             ctx.video_processor.calibrate_now = True
             calib_msg_ph.success(
@@ -285,11 +306,16 @@ with col_info:
     advice_ph = st.empty()
 
     st.markdown("---")
-    st.markdown("### Posture Score (Good %)")
-    score_ph = st.empty()
+    st.markdown("### Posture Scores")
+    st.write("Good:")
+    bar_good_ph = st.empty()
+    st.write("Mild:")
+    bar_mild_ph = st.empty()
+    st.write("Severe:")
+    bar_severe_ph = st.empty()
 
     st.markdown("---")
-    st.markdown("### Class Probabilities")
+    st.markdown("### Class Probabilities (Text)")
     prob_good_ph = st.empty()
     prob_mild_ph = st.empty()
     prob_severe_ph = st.empty()
@@ -297,7 +323,9 @@ with col_info:
     st.markdown("---")
     dist_ph = st.empty()
 
+    # Placeholders for sound & voice JS calls
     sound_ph = st.empty()
+    tts_ph = st.empty()
 
 
 # --- Main Update Loop ---
@@ -313,7 +341,7 @@ if ctx and ctx.state.playing:
             trigger_sound = vp.trigger_sound
             dist = vp.latest_distance
 
-            # Status & advice
+            # Status & advice + voice
             if pred == "good":
                 status_ph.markdown(
                     "<div class='good-text'>GOOD 😊</div>", unsafe_allow_html=True
@@ -322,6 +350,11 @@ if ctx and ctx.state.playing:
                     "<div class='advice-box'>✅ Perfect alignment! Keep this posture.</div>",
                     unsafe_allow_html=True,
                 )
+                tts_ph.markdown(
+                    "<script>updatePostureStatus('GOOD');</script>",
+                    unsafe_allow_html=True,
+                )
+
             elif pred == "mild":
                 status_ph.markdown(
                     "<div class='mild-text'>MILD 😐</div>", unsafe_allow_html=True
@@ -330,6 +363,11 @@ if ctx and ctx.state.playing:
                     "<div class='advice-box'>💡 Lift your head slightly and relax your shoulders.</div>",
                     unsafe_allow_html=True,
                 )
+                tts_ph.markdown(
+                    "<script>updatePostureStatus('MILD');</script>",
+                    unsafe_allow_html=True,
+                )
+
             else:
                 status_ph.markdown(
                     "<div class='severe-text'>SEVERE 🐢</div>", unsafe_allow_html=True
@@ -338,16 +376,21 @@ if ctx and ctx.state.playing:
                     "<div class='advice-box'>🚨 <b>Pull your chin back</b> and open your chest.</div>",
                     unsafe_allow_html=True,
                 )
+                tts_ph.markdown(
+                    "<script>updatePostureStatus('SEVERE');</script>",
+                    unsafe_allow_html=True,
+                )
 
-            # Good % progress bar
-            good_pct = int(probs.get("good", 0.0) * 100)
-            score_ph.progress(good_pct, text=f"{good_pct}%")
-
-            # Show all three probabilities
+            # Three horizontal bars for Good / Mild / Severe
             g = probs.get("good", 0.0) * 100
             m = probs.get("mild", 0.0) * 100
             s = probs.get("severe", 0.0) * 100
 
+            bar_good_ph.progress(int(g), text=f"{g:.1f}%")
+            bar_mild_ph.progress(int(m), text=f"{m:.1f}%")
+            bar_severe_ph.progress(int(s), text=f"{s:.1f}%")
+
+            # Text probabilities
             prob_good_ph.markdown(f"**Good:** {g:.1f}%")
             prob_mild_ph.markdown(f"**Mild:** {m:.1f}%")
             prob_severe_ph.markdown(f"**Severe:** {s:.1f}%")
@@ -357,7 +400,7 @@ if ctx and ctx.state.playing:
                 f"Current deviation from your standard posture: **{dist:.3f}**"
             )
 
-            # Sound alert
+            # Beep alert only for SEVERE (when trigger flag is set)
             if trigger_sound:
                 sound_ph.markdown(
                     "<script>playAlert();</script>", unsafe_allow_html=True
