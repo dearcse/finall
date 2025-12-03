@@ -154,14 +154,38 @@ with tab1:
             )
 
         with col2:
-            st.subheader("Live Status")
-            status_text_ph = st.empty()
-            
-            st.write("**Prediction Confidence:**")
-            bar_good_ph = st.empty()
-            bar_mild_ph = st.empty()
-            bar_severe_ph = st.empty()
-            warning_ph = st.empty()
+    st.subheader("Live Status")
+    status_text_ph = st.empty()
+    
+    st.write("**Prediction Confidence:**")
+    
+    # 3개의 column으로 나눠서 각자 bar placeholder 하나씩만 생성
+    col_good, col_mild, col_severe = st.columns(3)
+
+    with col_good:
+        st.markdown(
+            "<p style='text-align: center; color: #2ecc71; font-weight: bold;'>Good</p>",
+            unsafe_allow_html=True
+        )
+        bar_good_ph = st.empty()
+
+    with col_mild:
+        st.markdown(
+            "<p style='text-align: center; color: #f1c40f; font-weight: bold;'>Mild</p>",
+            unsafe_allow_html=True
+        )
+        bar_mild_ph = st.empty()
+
+    with col_severe:
+        st.markdown(
+            "<p style='text-align: center; color: #e74c3c; font-weight: bold;'>Severe</p>",
+            unsafe_allow_html=True
+        )
+        bar_severe_ph = st.empty()
+
+    # 경고 박스용 placeholder
+    warning_ph = st.empty()
+
 
         if ctx.state.playing:
             while True:
@@ -226,27 +250,41 @@ with tab2:
                     lm = landmarks[idx]
                     features.extend([(lm.x - center_x)/width, (lm.y - center_y)/width])
                 
-                probs = model.predict_proba([features])[0]
+                                # 3) 모델 예측 + severe 보정
+                probs = model.predict_proba([features])[0]   # 0~1 확률
                 classes = model.classes_
-                prob_dict = {cls: round(p * 100, 1) for cls, p in zip(classes, probs)}
-                
+
+                # adjust_probabilities로 severe 확률 보정 + 정규화
+                prob_dict_raw, pred = adjust_probabilities(probs, classes)
+                # prob_dict_raw: {'good':0.6, 'mild':0.3, 'severe':0.1} 이런 형태
+
+                # UI용 퍼센트 값으로 변환
+                good_pct = prob_dict_raw.get('good', 0) * 100
+                mild_pct = prob_dict_raw.get('mild', 0) * 100
+                severe_pct = prob_dict_raw.get('severe', 0) * 100
+
                 st.subheader("Analysis Result")
-                st.write(f"**Good: {prob_dict.get('good', 0)}%**")
-                st.progress(int(prob_dict.get('good', 0)))
-                st.write(f"**Mild: {prob_dict.get('mild', 0)}%**")
-                st.progress(int(prob_dict.get('mild', 0)))
-                st.write(f"**Severe: {prob_dict.get('severe', 0)}%**")
-                st.progress(int(prob_dict.get('severe', 0)))
-                
-                pred = model.predict([features])[0]
+
+                st.write(f"**Good: {good_pct:.1f}%**")
+                st.progress(int(good_pct))
+
+                st.write(f"**Mild: {mild_pct:.1f}%**")
+                st.progress(int(mild_pct))
+
+                st.write(f"**Severe: {severe_pct:.1f}%**")
+                st.progress(int(severe_pct))
+
+                # pred는 보정된 확률 기준 (adjust_probabilities에서 온 값)
                 if pred == 'severe':
                     st.error("🚨 WARNING: Severe Forward Head Posture detected!")
                 elif pred == 'mild':
                     st.warning("🟡 Caution: Mild Forward Head Posture.")
                 else:
                     st.success("🟢 Good Posture!")
+
             except:
                 st.error("Analysis failed.")
         else:
             st.error("Person not found.")
+
 
