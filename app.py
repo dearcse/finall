@@ -6,6 +6,7 @@ import joblib
 from PIL import Image
 import av
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
+from collections import deque
 
 # --- Page Configuration ---
 st.set_page_config(page_title="AI Real-time Posture Correction", page_icon="🐢")
@@ -35,6 +36,30 @@ def load_model():
 model = load_model()
 mp_pose = mp.solutions.pose
 
+# --- Helper Function: Adjust Probabilities ---
+def adjust_probabilities(probs, classes):
+    """
+    Severe 확률을 낮추고 나머지를 다시 정규화하는 보정 함수
+    probs: numpy array (각 클래스 확률)
+    classes: model.classes_ (['good','mild','severe'] 등)
+    """
+    prob_dict = {cls: float(p) for cls, p in zip(classes, probs)}
+
+    # severe 확률 0.7배로 줄이기 (너무 예민하게 뜨는 것 방지)
+    if 'severe' in prob_dict:
+        prob_dict['severe'] *= 0.7
+
+    # 합이 1이 되도록 다시 정규화
+    total = sum(prob_dict.values())
+    if total > 0:
+        for cls in prob_dict:
+            prob_dict[cls] /= total
+
+    # 보정 후 가장 높은 클래스
+    new_pred = max(prob_dict, key=prob_dict.get)
+    return prob_dict, new_pred
+
+
 # --- Real-time Video Processing Class ---
 class VideoProcessor(VideoTransformerBase):
     def __init__(self):
@@ -43,6 +68,9 @@ class VideoProcessor(VideoTransformerBase):
         # 결과 공유를 위한 변수
         self.latest_probs = {'good': 0, 'mild': 0, 'severe': 0}
         self.latest_pred = None
+        # 최근 프레임 확률을 저장해서 smoothing에 사용
+        self.history = deque(maxlen=10)   # ← 추가
+
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -77,16 +105,25 @@ class VideoProcessor(VideoTransformerBase):
 
                 # 3. Prediction
                 if self.model:
-                    probs = self.model.predict_proba([features])[0]
+                    # 1) 현재 프레임 확률
+                    probs = self.model.predict_proba([features])[0]   # shape: (n_classes,)
+                    self.history.append(probs)
+
+                    # 2) 최근 프레임 평균으로 smoothing
+                    avg_probs = np.mean(self.history, axis=0)
                     classes = self.model.classes_
-                    
-                    # 공유 변수 업데이트
-                    self.latest_probs = {cls: p for cls, p in zip(classes, probs)}
-                    self.latest_pred = self.model.predict([features])[0]
-                    
-                    # 4. 화면에는 점만 찍기 (텍스트 없음)
-                    for px, py in draw_points:
-                        cv2.circle(img, (px, py), 5, (0, 255, 0), -1)
+
+                    # 3) severe 확률 보정 + 정규화
+                    final_prob_dict, final_pred = adjust_probabilities(avg_probs, classes)
+
+                    # 4) 공유 변수 업데이트 (UI에서 사용)
+                    self.latest_probs = final_prob_dict      # 예: {'good':0.6,'mild':0.3,'severe':0.1}
+                    self.latest_pred = final_pred
+
+                # 4. 화면에는 점만 찍기 (텍스트 없음)
+                for px, py in draw_points:
+                    cv2.circle(img, (px, py), 5, (0, 255, 0), -1)
+
                     
             except Exception as e:
                 pass
@@ -212,3 +249,4 @@ with tab2:
                 st.error("Analysis failed.")
         else:
             st.error("Person not found.")
+
