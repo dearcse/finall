@@ -157,34 +157,43 @@ with tab1:
         with col2:
             st.subheader("Live Status")
             status_text_ph = st.empty()
-            
-            st.write("**Prediction Confidence:**")
-            
-            # 3 columns for 3 bars
-            col_good, col_mild, col_severe = st.columns(3)
 
-            with col_good:
+            st.write("**Prediction Confidence:**")
+
+            # --- Row 1: Labels (Good / Mild / Severe) ---
+            label_good, label_mild, label_severe = st.columns(3)
+
+            with label_good:
                 st.markdown(
                     "<p style='text-align: center; color: #2ecc71; font-weight: bold;'>Good</p>",
                     unsafe_allow_html=True
                 )
-                bar_good_ph = st.empty()
 
-            with col_mild:
+            with label_mild:
                 st.markdown(
                     "<p style='text-align: center; color: #f1c40f; font-weight: bold;'>Mild</p>",
                     unsafe_allow_html=True
                 )
-                bar_mild_ph = st.empty()
 
-            with col_severe:
+            with label_severe:
                 st.markdown(
                     "<p style='text-align: center; color: #e74c3c; font-weight: bold;'>Severe</p>",
                     unsafe_allow_html=True
                 )
-                bar_severe_ph = st.empty()
 
+            # --- Row 2: Full-width horizontal bars ---
+            st.write("Good:")
+            bar_good_ph = st.empty()
+
+            st.write("Mild:")
+            bar_mild_ph = st.empty()
+
+            st.write("Severe:")
+            bar_severe_ph = st.empty()
+
+            # Warning box placeholder
             warning_ph = st.empty()
+
 
     # -------------------- LOOP (OUTSIDE col1/col2!) --------------------
     if ctx.state.playing:
