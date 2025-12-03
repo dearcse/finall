@@ -2,8 +2,6 @@ import streamlit as st
 import cv2
 import numpy as np
 import mediapipe as mp
-import joblib
-from PIL import Image
 import av
 import time
 from collections import deque
@@ -14,7 +12,6 @@ st.set_page_config(page_title="AI Posture Correction Pro", page_icon="🐢", lay
 
 # --- CSS & Audio Script ---
 def get_audio_html():
-    # 브라우저 기본 오디오 사용 (간단한 beep)
     js_code = """
         <script>
         function playAlert() {
@@ -29,7 +26,6 @@ def get_audio_html():
 
 st.markdown("""
     <style>
-    .big-font { font-size:24px !important; font-weight: bold; }
     .good-text { color: #2ecc71; font-weight: bold; font-size: 30px; }
     .mild-text { color: #f1c40f; font-weight: bold; font-size: 30px; }
     .severe-text { color: #e74c3c; font-weight: bold; font-size: 30px; animation: blink 1s infinite; }
@@ -39,7 +35,7 @@ st.markdown("""
         padding: 15px;
         border-radius: 10px;
         border-left: 5px solid #fbc02d;
-        font-size: 20px;
+        font-size: 18px;
         font-weight: bold;
         color: #333;
         margin-top: 10px;
@@ -58,33 +54,27 @@ st.markdown("""
 st.markdown(get_audio_html(), unsafe_allow_html=True)
 
 st.title("🐢 AI Posture Correction Pro")
-st.markdown("Turn on the webcam to analyze your posture. **First, set your own best posture as the standard.**")
+st.markdown(
+    "Turn on your webcam to analyze your posture in real time. "
+    "**First, set your own best posture as the standard.**"
+)
 
-# --- Load Model & MediaPipe (모델은 로드만 하고 사용은 안 함: 호환용) ---
-@st.cache_resource
-def load_model():
-    try:
-        return joblib.load('posture_model.pkl')
-    except:
-        return None
-
-model = load_model()
 mp_pose = mp.solutions.pose
 
-# --- 거리 기반 확률 계산 함수 (Calibration 전용) ---
+
+# --- Distance → Probabilities (Good / Mild / Severe) ---
 def distance_to_probs(distance, t_good=0.12, t_mild=0.28):
     """
-    baseline과의 거리(distance)를 받아
-    good / mild / severe의 확률 분포를 만들어서 반환.
-    t_good: 이 값보다 작으면 거의 good
-    t_mild: 이 값보다 크면 severe로 기울기 시작
+    Map distance from baseline to probabilities for good/mild/severe.
+    t_good: below this, mostly 'good'
+    t_mild: above this, starts to become 'severe'
     """
     d = float(distance)
 
-    # Good 점수: 0에서 t_good까지 선형으로 감소
+    # Good score decreases as distance grows
     good_score = max(0.0, 1.0 - d / max(t_good, 1e-6))
 
-    # Mild 점수: t_good 근처에서 높고, 0과 t_mild에서 0이 되도록
+    # Mild score is high in the middle band
     if d <= t_good:
         mild_score = d / max(t_good, 1e-6)
     elif d <= t_mild:
@@ -92,7 +82,7 @@ def distance_to_probs(distance, t_good=0.12, t_mild=0.28):
     else:
         mild_score = 0.0
 
-    # Severe 점수: t_mild 이후부터 증가
+    # Severe score increases after t_mild
     if d <= t_mild:
         severe_score = 0.0
     else:
@@ -113,13 +103,13 @@ def distance_to_probs(distance, t_good=0.12, t_mild=0.28):
     return scores
 
 
-# --- 포즈 랜드마크에서 feature 추출 (학습 코드와 동일 논리) ---
+# --- Feature extraction (same logic as training) ---
 def extract_features_from_landmarks(landmarks, img_shape):
     """
-    MediaPipe pose_landmarks와 이미지 크기에서
-    어깨 기준으로 정규화된 상반신 특징 벡터와 화면에 찍을 포인트 좌표를 반환.
+    Use upper-body keypoints (nose, eyes, ears, shoulders),
+    normalized by shoulder width and centered at shoulder midpoint.
+    Returns (feature_vector, keypoints_for_drawing)
     """
-    # 왼/오른 어깨
     l_sh = landmarks[11]
     r_sh = landmarks[12]
 
@@ -131,7 +121,7 @@ def extract_features_from_landmarks(landmarks, img_shape):
     if width == 0:
         width = 1.0
 
-    indices = [0, 2, 5, 7, 8, 11, 12]  # 코, 눈, 귀, 어깨
+    indices = [0, 2, 5, 7, 8, 11, 12]  # nose, eyes, ears, shoulders
     features = []
 
     h, w, _ = img_shape
@@ -148,7 +138,7 @@ def extract_features_from_landmarks(landmarks, img_shape):
     return features, keypoints
 
 
-# --- Real-time Video Processing Class (Calibration + Distance 기반 판단) ---
+# --- Video Processor with Calibration + Distance-based Classification ---
 class VideoProcessor(VideoTransformerBase):
     def __init__(self):
         self.pose = mp_pose.Pose(
@@ -157,19 +147,19 @@ class VideoProcessor(VideoTransformerBase):
             model_complexity=1
         )
 
-        # 1. Baseline (내 기준 자세)
+        # Personal standard posture (baseline)
         self.baseline = None
-        self.calibrate_now = False   # 버튼 눌렸을 때 True로 바뀌고, 다음 프레임에서 baseline 저장
+        self.calibrate_now = False  # set True when button pressed
 
-        # 2. 거리 smoothing
+        # Distance smoothing
         self.distance_history = deque(maxlen=10)
 
-        # 3. 결과 공유용 변수
-        self.latest_probs = {'good': 0.0, 'mild': 0.0, 'severe': 0.0}
+        # Shared outputs
+        self.latest_probs = {"good": 0.0, "mild": 0.0, "severe": 0.0}
         self.latest_pred = "good"
         self.latest_distance = 0.0
 
-        # 4. 사운드용
+        # Sound alert
         self.severe_consecutive_frames = 0
         self.trigger_sound = False
 
@@ -182,20 +172,19 @@ class VideoProcessor(VideoTransformerBase):
 
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
-
             try:
-                # 1) Feature 추출
+                # 1. Feature extraction
                 features, keypoints = extract_features_from_landmarks(
                     landmarks, img.shape
                 )
 
-                # 2) 캘리브레이션 버튼이 눌린 경우 → 현재 자세를 baseline으로 저장
+                # 2. Calibration: when flag is True, save current features as baseline
                 if self.calibrate_now:
                     self.baseline = np.array(features)
                     self.distance_history.clear()
                     self.calibrate_now = False
 
-                # 3) baseline이 설정된 경우 → 거리 계산 + 확률/레이블 업데이트
+                # 3. If baseline exists, compute distance and map to probabilities
                 if self.baseline is not None:
                     diff = np.array(features) - np.array(self.baseline)
                     dist = float(np.linalg.norm(diff))
@@ -203,31 +192,29 @@ class VideoProcessor(VideoTransformerBase):
                     avg_dist = float(np.mean(self.distance_history))
 
                     self.latest_distance = avg_dist
-
-                    # 거리 → 확률 분포
                     prob_dict = distance_to_probs(avg_dist)
                     self.latest_probs = prob_dict
                     self.latest_pred = max(prob_dict, key=prob_dict.get)
                 else:
-                    # baseline이 아직 없으면, 임시로 모두 good으로
-                    self.latest_probs = {'good': 1.0, 'mild': 0.0, 'severe': 0.0}
-                    self.latest_pred = 'good'
+                    # No baseline yet → assume good temporarily
                     self.latest_distance = 0.0
+                    self.latest_probs = {"good": 1.0, "mild": 0.0, "severe": 0.0}
+                    self.latest_pred = "good"
 
                 current_pred = self.latest_pred
 
-                # 4) Skeleton 시각화 (색상: good=초록, mild=노랑, severe=빨강)
-                color = (0, 255, 0)  # Green
-                if current_pred == 'mild':
-                    color = (0, 255, 255)  # Yellow
-                if current_pred == 'severe':
-                    color = (0, 0, 255)  # Red
+                # 4. Visualization color
+                color = (0, 255, 0)  # green
+                if current_pred == "mild":
+                    color = (0, 255, 255)  # yellow
+                elif current_pred == "severe":
+                    color = (0, 0, 255)  # red
 
-                # 점 찍기
-                for idx, (px, py) in keypoints.items():
+                # Draw keypoints
+                for _, (px, py) in keypoints.items():
                     cv2.circle(img, (px, py), 5, color, -1)
 
-                # 어깨선, 목선
+                # Draw shoulders and neck line
                 if 11 in keypoints and 12 in keypoints:
                     cv2.line(img, keypoints[11], keypoints[12], color, 2)
                 if 0 in keypoints and 11 in keypoints and 12 in keypoints:
@@ -237,10 +224,10 @@ class VideoProcessor(VideoTransformerBase):
                     )
                     cv2.line(img, sh_center, keypoints[0], color, 2)
 
-                # 5) 사운드 트리거 (severe가 일정 프레임 이상 지속되면)
-                if current_pred == 'severe':
+                # 5. Sound trigger (if severe lasts for ~1 second)
+                if current_pred == "severe":
                     self.severe_consecutive_frames += 1
-                    if self.severe_consecutive_frames > 30:  # 대략 1초 이상
+                    if self.severe_consecutive_frames > 30:
                         self.trigger_sound = True
                 else:
                     self.severe_consecutive_frames = 0
@@ -252,96 +239,128 @@ class VideoProcessor(VideoTransformerBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
-# --- UI Layout ---
-col_main, col_sidebar = st.columns([3, 1])
+# --- Layout: Left = Video, Right = Controls & Status ---
+col_video, col_info = st.columns([3, 2])
 
 ctx = None
 
-with col_main:
-    # Calibration Button
-    st.markdown("### 📏 Calibration")
-    st.markdown("1. 편안하지만 **가장 바른 자세**를 만든 뒤<br>2. 아래 버튼을 눌러 현재 자세를 기준으로 저장하세요.", unsafe_allow_html=True)
-
-    calib_msg_ph = st.empty()
-
-    # webrtc_streamer 먼저 생성
-    if model is None:
-        # 모델은 안 쓰지만, 파일이 없어도 문제없이 동작하게 그냥 정보만
-        st.info("Model file (posture_model.pkl) is missing, but calibration-based mode works without it.")
+with col_video:
+    st.subheader("Webcam")
     ctx = webrtc_streamer(
         key="posture-pro",
         video_processor_factory=VideoProcessor,
         mode=WebRtcMode.SENDRECV,
-        rtc_configuration=RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}),
+        rtc_configuration=RTCConfiguration(
+            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        ),
         media_stream_constraints={"video": True, "audio": False},
-        async_processing=True
+        async_processing=True,
     )
 
-    # 버튼: 현재 프레임 기준으로 baseline을 세팅하도록 플래그만 켬
-    if st.button("📏 Set Current Posture as 'Standard'"):
+with col_info:
+    st.subheader("Calibration")
+    st.markdown(
+        "1. Sit comfortably and create your **best upright posture**.<br>"
+        "2. Click the button below to save your current posture as the **standard**.",
+        unsafe_allow_html=True,
+    )
+
+    calib_msg_ph = st.empty()
+    if st.button("📏 Set Current Posture as Standard"):
         if ctx and ctx.video_processor:
             ctx.video_processor.calibrate_now = True
-            calib_msg_ph.success("✅ Standard posture captured! (Hold similar pose when you want 'GOOD')")
+            calib_msg_ph.success(
+                "✅ Your standard posture has been saved! "
+                "Try to return to this position when you want a 'GOOD' rating."
+            )
         else:
-            calib_msg_ph.warning("Webcam is not ready yet. Please wait a moment and try again.")
+            calib_msg_ph.warning(
+                "Webcam is not ready yet. Please wait a moment and try again."
+            )
 
-
-with col_sidebar:
+    st.markdown("---")
     st.markdown("### 📊 Live Status")
+
     status_ph = st.empty()
     advice_ph = st.empty()
-    
-    st.write("---")
+
+    st.markdown("---")
     st.markdown("### Posture Score (Good %)")
     score_ph = st.empty()
-    
-    st.write("---")
+
+    st.markdown("---")
+    st.markdown("### Class Probabilities")
+    prob_good_ph = st.empty()
+    prob_mild_ph = st.empty()
+    prob_severe_ph = st.empty()
+
+    st.markdown("---")
     dist_ph = st.empty()
 
-    # Hidden placeholder for sound
     sound_ph = st.empty()
 
-# --- Main Loop ---
+
+# --- Main Update Loop ---
 if ctx and ctx.state.playing:
     while True:
         if not ctx.state.playing:
             break
 
-        if ctx.video_processor:
-            probs = ctx.video_processor.latest_probs
-            pred = ctx.video_processor.latest_pred
-            trigger_sound = ctx.video_processor.trigger_sound
-            dist = ctx.video_processor.latest_distance
+        vp = ctx.video_processor
+        if vp is not None:
+            probs = vp.latest_probs
+            pred = vp.latest_pred
+            trigger_sound = vp.trigger_sound
+            dist = vp.latest_distance
 
-            # 1. Update Status Text & Advice
-            if pred == 'good':
-                status_ph.markdown("<div class='good-text'>GOOD 😊</div>", unsafe_allow_html=True)
-                advice_ph.markdown("<div class='advice-box'>✅ Perfect alignment! Keep it up.</div>", unsafe_allow_html=True)
-            
-            elif pred == 'mild':
-                status_ph.markdown("<div class='mild-text'>MILD 😐</div>", unsafe_allow_html=True)
-                advice_ph.markdown("<div class='advice-box'>💡 Lift your head slightly.<br>Relax your shoulders.</div>", unsafe_allow_html=True)
-            
-            else:  # severe
-                status_ph.markdown("<div class='severe-text'>SEVERE 🐢</div>", unsafe_allow_html=True)
-                advice_ph.markdown("<div class='advice-box'>🚨 <b>Pull chin back!</b><br>Open your chest.</div>", unsafe_allow_html=True)
-            
-            # 2. Update Single Posture Score Bar (Probability of Good)
-            good_score = int(probs.get('good', 0) * 100)
-            score_ph.progress(good_score, text=f"{good_score}%")
+            # Status & advice
+            if pred == "good":
+                status_ph.markdown(
+                    "<div class='good-text'>GOOD 😊</div>", unsafe_allow_html=True
+                )
+                advice_ph.markdown(
+                    "<div class='advice-box'>✅ Perfect alignment! Keep this posture.</div>",
+                    unsafe_allow_html=True,
+                )
+            elif pred == "mild":
+                status_ph.markdown(
+                    "<div class='mild-text'>MILD 😐</div>", unsafe_allow_html=True
+                )
+                advice_ph.markdown(
+                    "<div class='advice-box'>💡 Lift your head slightly and relax your shoulders.</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                status_ph.markdown(
+                    "<div class='severe-text'>SEVERE 🐢</div>", unsafe_allow_html=True
+                )
+                advice_ph.markdown(
+                    "<div class='advice-box'>🚨 <b>Pull your chin back</b> and open your chest.</div>",
+                    unsafe_allow_html=True,
+                )
 
-            # 3. Baseline과의 거리 표시 (참고용)
-            dist_ph.markdown(f"Current deviation from standard posture: <b>{dist:.3f}</b>", unsafe_allow_html=True)
+            # Good % progress bar
+            good_pct = int(probs.get("good", 0.0) * 100)
+            score_ph.progress(good_pct, text=f"{good_pct}%")
 
-            # 4. Sound Alert
+            # Show all three probabilities
+            g = probs.get("good", 0.0) * 100
+            m = probs.get("mild", 0.0) * 100
+            s = probs.get("severe", 0.0) * 100
+
+            prob_good_ph.markdown(f"**Good:** {g:.1f}%")
+            prob_mild_ph.markdown(f"**Mild:** {m:.1f}%")
+            prob_severe_ph.markdown(f"**Severe:** {s:.1f}%")
+
+            # Distance from baseline
+            dist_ph.markdown(
+                f"Current deviation from your standard posture: **{dist:.3f}**"
+            )
+
+            # Sound alert
             if trigger_sound:
                 sound_ph.markdown(
-                    """
-                    <script>
-                    playAlert();
-                    </script>
-                    """,
-                    unsafe_allow_html=True,
+                    "<script>playAlert();</script>", unsafe_allow_html=True
                 )
             else:
                 sound_ph.empty()
