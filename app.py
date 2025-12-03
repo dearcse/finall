@@ -2,17 +2,18 @@ import streamlit as st
 import cv2
 import numpy as np
 import mediapipe as mp
-import joblib
 from PIL import Image
 import av
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 from collections import deque
+import time
 
 # --- Page Configuration ---
-st.set_page_config(page_title="AI Real-time Posture Correction", page_icon="🐢")
+st.set_page_config(page_title="AI Real-time Posture Calibration", page_icon="🐢")
 
-# 스타일 설정
-st.markdown("""
+# --- 스타일 설정 ---
+st.markdown(
+    """
     <style>
     .big-font { font-size:24px !important; font-weight: bold; }
     .good-text { color: #2ecc71; font-weight: bold; font-size: 20px;}
@@ -20,208 +21,286 @@ st.markdown("""
     .severe-text { color: #e74c3c; font-weight: bold; font-size: 20px;}
     .warning-box { background-color: #fadbd8; border: 2px solid #e74c3c; padding: 15px; border-radius: 10px; text-align: center; }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-st.title("🐢 AI Real-time Turtle Neck Diagnosis")
-st.write("Turn on the webcam to analyze your posture in real-time.")
+st.title("🐢 AI Real-time Turtle Neck Calibration")
+st.write("First, hold your **best posture** for a few seconds. The app will use it as your personal standard.")
 
-# --- Load Model & MediaPipe ---
-@st.cache_resource
-def load_model():
-    try:
-        return joblib.load('posture_model.pkl')
-    except:
-        return None
-
-model = load_model()
 mp_pose = mp.solutions.pose
 
-# --- Helper Function: Adjust Probabilities ---
-def adjust_probabilities(probs, classes):
+
+# --- 공통 Feature 추출 함수 (학습 때와 동일한 방식) ---
+def extract_features_from_landmarks(landmarks, img_shape):
     """
-    Severe 확률을 낮추고 나머지를 다시 정규화하는 보정 함수
-    probs: numpy array (각 클래스 확률)
-    classes: model.classes_ (['good','mild','severe'] 등)
+    MediaPipe pose_landmarks와 이미지 크기에서
+    어깨 기준으로 정규화된 상반신 특징 벡터와 화면에 찍을 포인트 좌표를 반환.
     """
-    prob_dict = {cls: float(p) for cls, p in zip(classes, probs)}
+    # 왼/오른 어깨
+    l_sh = landmarks[11]
+    r_sh = landmarks[12]
 
-    # severe 확률 0.7배로 줄이기 (너무 예민하게 뜨는 것 방지)
-    if 'severe' in prob_dict:
-        prob_dict['severe'] *= 0.7
+    center_x = (l_sh.x + r_sh.x) / 2.0
+    center_y = (l_sh.y + r_sh.y) / 2.0
+    width = np.linalg.norm(
+        np.array([l_sh.x, l_sh.y]) - np.array([r_sh.x, r_sh.y])
+    )
+    if width == 0:
+        width = 1.0
 
-    # 합이 1이 되도록 다시 정규화
-    total = sum(prob_dict.values())
-    if total > 0:
-        for cls in prob_dict:
-            prob_dict[cls] /= total
+    indices = [0, 2, 5, 7, 8, 11, 12]  # 코, 눈, 귀, 어깨
+    features = []
 
-    # 보정 후 가장 높은 클래스
-    new_pred = max(prob_dict, key=prob_dict.get)
-    return prob_dict, new_pred
+    h, w, _ = img_shape
+    draw_points = []
+
+    for idx in indices:
+        lm = landmarks[idx]
+        norm_x = (lm.x - center_x) / width
+        norm_y = (lm.y - center_y) / width
+        features.extend([norm_x, norm_y])
+        draw_points.append((int(lm.x * w), int(lm.y * h)))
+
+    return features, draw_points
+
+
+# --- 거리 기반 확률 계산 함수 (fuzzy membership 비슷하게) ---
+def distance_to_probs(distance, t_good=0.12, t_mild=0.28):
+    """
+    baseline과의 거리(distance)를 받아
+    good / mild / severe의 확률 분포를 만들어서 반환.
+    t_good: 이 값보다 작으면 거의 good
+    t_mild: 이 값보다 크면 severe로 기울기 시작
+    """
+    d = float(distance)
+
+    # Good 점수: 0에서 t_good까지 선형으로 감소
+    good_score = max(0.0, 1.0 - d / max(t_good, 1e-6))
+
+    # Mild 점수: t_good 근처에서 높고, 0과 t_mild에서 0이 되도록
+    if d <= t_good:
+        mild_score = d / max(t_good, 1e-6)
+    elif d <= t_mild:
+        mild_score = 1.0 - (d - t_good) / max(t_mild - t_good, 1e-6)
+    else:
+        mild_score = 0.0
+
+    # Severe 점수: t_mild 이후부터 증가
+    if d <= t_mild:
+        severe_score = 0.0
+    else:
+        # t_mild 이후로 점점 1에 가까워지도록
+        severe_score = min(1.0, (d - t_mild) / max(t_mild, 1e-6))
+
+    scores = {
+        "good": good_score,
+        "mild": mild_score,
+        "severe": severe_score,
+    }
+    total = sum(scores.values())
+    if total <= 0:
+        # 전부 0이면 균등분포
+        return {"good": 1 / 3, "mild": 1 / 3, "severe": 1 / 3}
+
+    # 정규화
+    for k in scores:
+        scores[k] /= total
+
+    return scores
 
 
 # --- Real-time Video Processing Class ---
 class VideoProcessor(VideoTransformerBase):
     def __init__(self):
-        self.pose = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5, model_complexity=1)
-        self.model = model
-        # 결과 공유를 위한 변수
-        self.latest_probs = {'good': 0, 'mild': 0, 'severe': 0}
-        self.latest_pred = None
-        # 최근 프레임 확률을 저장해서 smoothing에 사용
-        self.history = deque(maxlen=10)   # ← 추가
+        self.pose = mp_pose.Pose(
+            static_image_mode=False,
+            min_detection_confidence=0.5,
+            model_complexity=1,
+        )
 
+        # 캘리브레이션 관련
+        self.collecting_baseline = True
+        self.baseline_buffer = []
+        self.baseline = None
+
+        # 거리 smoothing
+        self.distance_history = deque(maxlen=10)
+
+        # 실시간 상태 공유용
+        self.latest_probs = {"good": 0.0, "mild": 0.0, "severe": 0.0}
+        self.latest_pred = None
+        self.latest_distance = 0.0
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        
-        # 1. Image Processing
+
+        # 1. MediaPipe 처리
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = self.pose.process(img_rgb)
 
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
-            
+
             try:
-                # 2. Feature Extraction
-                l_sh = landmarks[11]; r_sh = landmarks[12]
-                center_x = (l_sh.x + r_sh.x) / 2
-                center_y = (l_sh.y + r_sh.y) / 2
-                width = np.linalg.norm(np.array([l_sh.x, l_sh.y]) - np.array([r_sh.x, r_sh.y]))
-                if width == 0: width = 1
+                # 2. Feature 추출
+                features, draw_points = extract_features_from_landmarks(
+                    landmarks, img.shape
+                )
 
-                indices = [0, 2, 5, 7, 8, 11, 12]
-                features = []
-                
-                h, w, _ = img.shape
-                draw_points = []
+                # 3. Calibration / Distance 계산
+                if self.collecting_baseline:
+                    # baseline 수집 단계
+                    self.baseline_buffer.append(features)
+                    # 20프레임 정도 모으면 평균을 baseline으로 사용
+                    if len(self.baseline_buffer) >= 20:
+                        self.baseline = np.mean(self.baseline_buffer, axis=0)
+                        self.collecting_baseline = False
+                        self.distance_history.clear()
+                elif self.baseline is not None:
+                    # baseline이 준비된 이후 → 현재 자세와 거리 계산
+                    diff = np.array(features) - np.array(self.baseline)
+                    dist = float(np.linalg.norm(diff))
+                    self.distance_history.append(dist)
+                    avg_dist = float(np.mean(self.distance_history))
 
-                for idx in indices:
-                    lm = landmarks[idx]
-                    norm_x = (lm.x - center_x) / width
-                    norm_y = (lm.y - center_y) / width
-                    features.extend([norm_x, norm_y])
-                    draw_points.append((int(lm.x * w), int(lm.y * h)))
+                    self.latest_distance = avg_dist
 
-                # 3. Prediction
-                if self.model:
-                    # 1) 현재 프레임 확률
-                    probs = self.model.predict_proba([features])[0]   # shape: (n_classes,)
-                    self.history.append(probs)
+                    # 거리 → good/mild/severe 확률 분포
+                    prob_dict = distance_to_probs(avg_dist)
+                    self.latest_probs = prob_dict
 
-                    # 2) 최근 프레임 평균으로 smoothing
-                    avg_probs = np.mean(self.history, axis=0)
-                    classes = self.model.classes_
+                    # 가장 높은 확률을 pred로 사용
+                    self.latest_pred = max(prob_dict, key=prob_dict.get)
 
-                    # 3) severe 확률 보정 + 정규화
-                    final_prob_dict, final_pred = adjust_probabilities(avg_probs, classes)
-
-                    # 4) 공유 변수 업데이트 (UI에서 사용)
-                    self.latest_probs = final_prob_dict      # 예: {'good':0.6,'mild':0.3,'severe':0.1}
-                    self.latest_pred = final_pred
-
-                # 4. 화면에는 점만 찍기 (텍스트 없음)
+                # 4. 화면에는 점만 찍기
                 for px, py in draw_points:
                     cv2.circle(img, (px, py), 5, (0, 255, 0), -1)
 
-                    
-            except Exception as e:
+            except Exception:
+                # 에러 발생 시 프레임만 그대로 반환
                 pass
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# --- Main Tab Configuration ---
-tab1, tab2 = st.tabs(["📷 Real-time Analysis", "🖼️ Upload Photo"])
 
-# Tab 1: Real-time with External UI
+# --- Main Tab Configuration ---
+tab1, tab2 = st.tabs(["📷 Real-time (Calibrated)", "🖼️ Upload Photo (disabled)"])
+
+# Tab 1: Real-time with Calibration
 with tab1:
-    st.header("Real-time Webcam")
-    
-    if model is None:
-        st.error("Model file (posture_model.pkl) is missing.")
-    else:
-        col1, col2 = st.columns([2, 1])
-        
-        # -------------------- LEFT SIDE (VIDEO) --------------------
-        with col1:
-            ctx = webrtc_streamer(
-                key="posture-check",
-                video_processor_factory=VideoProcessor,
-                mode=WebRtcMode.SENDRECV,
-                media_stream_constraints={"video": True, "audio": False},
-                rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-                async_processing=True
+    st.header("Real-time Webcam (Personal Calibration)")
+
+    col1, col2 = st.columns([2, 1])
+
+    # 왼쪽: 웹캠
+    with col1:
+        ctx = webrtc_streamer(
+            key="posture-calibration",
+            video_processor_factory=VideoProcessor,
+            mode=WebRtcMode.SENDRECV,
+            media_stream_constraints={"video": True, "audio": False},
+            rtc_configuration={
+                "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+            },
+            async_processing=True,
+        )
+
+    # 오른쪽: 상태 표시
+    with col2:
+        st.subheader("Live Status")
+
+        calib_text_ph = st.empty()
+        status_text_ph = st.empty()
+
+        st.write("**Prediction Confidence:**")
+
+        # 라벨 (Good / Mild / Severe)
+        label_good, label_mild, label_severe = st.columns(3)
+
+        with label_good:
+            st.markdown(
+                "<p style='text-align: center; color: #2ecc71; font-weight: bold;'>Good</p>",
+                unsafe_allow_html=True,
             )
 
-        # -------------------- RIGHT SIDE (UI STATUS) --------------------
-        with col2:
-            st.subheader("Live Status")
-            status_text_ph = st.empty()
+        with label_mild:
+            st.markdown(
+                "<p style='text-align: center; color: #f1c40f; font-weight: bold;'>Mild</p>",
+                unsafe_allow_html=True,
+            )
 
-            st.write("**Prediction Confidence:**")
+        with label_severe:
+            st.markdown(
+                "<p style='text-align: center; color: #e74c3c; font-weight: bold;'>Severe</p>",
+                unsafe_allow_html=True,
+            )
 
-            # --- Row 1: Labels (Good / Mild / Severe) ---
-            label_good, label_mild, label_severe = st.columns(3)
+        # 가로 Progress bar (전체 폭)
+        st.write("Good:")
+        bar_good_ph = st.empty()
 
-            with label_good:
-                st.markdown(
-                    "<p style='text-align: center; color: #2ecc71; font-weight: bold;'>Good</p>",
-                    unsafe_allow_html=True
-                )
+        st.write("Mild:")
+        bar_mild_ph = st.empty()
 
-            with label_mild:
-                st.markdown(
-                    "<p style='text-align: center; color: #f1c40f; font-weight: bold;'>Mild</p>",
-                    unsafe_allow_html=True
-                )
+        st.write("Severe:")
+        bar_severe_ph = st.empty()
 
-            with label_severe:
-                st.markdown(
-                    "<p style='text-align: center; color: #e74c3c; font-weight: bold;'>Severe</p>",
-                    unsafe_allow_html=True
-                )
+        warning_ph = st.empty()
+        distance_ph = st.empty()
 
-            # --- Row 2: Full-width horizontal bars ---
-            st.write("Good:")
-            bar_good_ph = st.empty()
-
-            st.write("Mild:")
-            bar_mild_ph = st.empty()
-
-            st.write("Severe:")
-            bar_severe_ph = st.empty()
-
-            # Warning box placeholder
-            warning_ph = st.empty()
-
-
-    # -------------------- LOOP (OUTSIDE col1/col2!) --------------------
-    if ctx.state.playing:
+    # 실시간 업데이트 루프
+    if ctx and ctx.state.playing:
         while True:
-            if ctx.video_processor:
-                probs = ctx.video_processor.latest_probs
-                pred = ctx.video_processor.latest_pred
+            if not ctx.state.playing:
+                break
 
-                if pred:
-                    p_good = int(probs.get('good', 0) * 100)
-                    p_mild = int(probs.get('mild', 0) * 100)
-                    p_severe = int(probs.get('severe', 0) * 100)
+            vp = ctx.video_processor
 
-                    # Status Text
-                    if pred == 'good':
+            if vp is not None:
+                # 캘리브레이션 상태 표시
+                if vp.collecting_baseline or vp.baseline is None:
+                    calib_text_ph.info(
+                        "🧭 Calibrating… Please hold your **best neutral posture**."
+                    )
+                else:
+                    calib_text_ph.success(
+                        "✅ Calibration complete! Now analyzing your posture."
+                    )
+
+                probs = vp.latest_probs
+                pred = vp.latest_pred
+                dist = vp.latest_distance
+
+                # distance 표시 (참고용)
+                if vp.baseline is not None:
+                    distance_ph.markdown(
+                        f"<p>Current deviation from baseline: <b>{dist:.3f}</b></p>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    distance_ph.empty()
+
+                if pred is not None:
+                    p_good = int(probs.get("good", 0.0) * 100)
+                    p_mild = int(probs.get("mild", 0.0) * 100)
+                    p_severe = int(probs.get("severe", 0.0) * 100)
+
+                    # 상태 텍스트
+                    if pred == "good":
                         status_text_ph.markdown(
                             "<p class='good-text'>Status: GOOD 😊</p>",
-                            unsafe_allow_html=True
+                            unsafe_allow_html=True,
                         )
-                    elif pred == 'mild':
+                    elif pred == "mild":
                         status_text_ph.markdown(
                             "<p class='mild-text'>Status: MILD 😐</p>",
-                            unsafe_allow_html=True
+                            unsafe_allow_html=True,
                         )
                     else:
                         status_text_ph.markdown(
                             "<p class='severe-text'>Status: SEVERE 🐢</p>",
-                            unsafe_allow_html=True
+                            unsafe_allow_html=True,
                         )
 
                     # Progress bars
@@ -230,7 +309,7 @@ with tab1:
                     bar_severe_ph.progress(p_severe, text=f"Severe: {p_severe}%")
 
                     # Warning box
-                    if pred == 'severe':
+                    if pred == "severe":
                         warning_ph.markdown(
                             """
                             <div class='warning-box'>
@@ -238,79 +317,30 @@ with tab1:
                                 Please straighten your neck.
                             </div>
                             """,
-                            unsafe_allow_html=True
+                            unsafe_allow_html=True,
                         )
                     else:
                         warning_ph.empty()
+                else:
+                    # 아직 baseline만 모으는 중이거나, 정보 부족
+                    status_text_ph.markdown(
+                        "<p>Waiting for stable posture...</p>",
+                        unsafe_allow_html=True,
+                    )
+                    bar_good_ph.progress(0, text="Good: 0%")
+                    bar_mild_ph.progress(0, text="Mild: 0%")
+                    bar_severe_ph.progress(0, text="Severe: 0%")
+                    warning_ph.empty()
 
-            import time
             time.sleep(0.1)
 
-# Tab 2: Upload
+# Tab 2: Upload (현재 비활성화)
 with tab2:
-    st.header("File Upload Diagnosis")
-    uploaded_file = st.file_uploader("Choose an image file", type=['jpg', 'jpeg', 'png'])
-    
-    if uploaded_file and model:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Uploaded Image", use_column_width=True)
-        
-        img_np = np.array(image.convert('RGB'))
-        pose_static = mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5, model_complexity=1)
-        results = pose_static.process(img_np)
-        
-        if results.pose_landmarks:
-            landmarks = results.pose_landmarks.landmark
-            try:
-                l_sh = landmarks[11]; r_sh = landmarks[12]
-                center_x = (l_sh.x + r_sh.x) / 2
-                center_y = (l_sh.y + r_sh.y) / 2
-                width = np.linalg.norm(np.array([l_sh.x, l_sh.y]) - np.array([r_sh.x, r_sh.y]))
-                if width == 0: width = 1
-                
-                features = []
-                indices = [0, 2, 5, 7, 8, 11, 12]
-                for idx in indices:
-                    lm = landmarks[idx]
-                    features.extend([(lm.x - center_x)/width, (lm.y - center_y)/width])
-                
-                                # 3) 모델 예측 + severe 보정
-                probs = model.predict_proba([features])[0]   # 0~1 확률
-                classes = model.classes_
-
-                # adjust_probabilities로 severe 확률 보정 + 정규화
-                prob_dict_raw, pred = adjust_probabilities(probs, classes)
-                # prob_dict_raw: {'good':0.6, 'mild':0.3, 'severe':0.1} 이런 형태
-
-                # UI용 퍼센트 값으로 변환
-                good_pct = prob_dict_raw.get('good', 0) * 100
-                mild_pct = prob_dict_raw.get('mild', 0) * 100
-                severe_pct = prob_dict_raw.get('severe', 0) * 100
-
-                st.subheader("Analysis Result")
-
-                st.write(f"**Good: {good_pct:.1f}%**")
-                st.progress(int(good_pct))
-
-                st.write(f"**Mild: {mild_pct:.1f}%**")
-                st.progress(int(mild_pct))
-
-                st.write(f"**Severe: {severe_pct:.1f}%**")
-                st.progress(int(severe_pct))
-
-                # pred는 보정된 확률 기준 (adjust_probabilities에서 온 값)
-                if pred == 'severe':
-                    st.error("🚨 WARNING: Severe Forward Head Posture detected!")
-                elif pred == 'mild':
-                    st.warning("🟡 Caution: Mild Forward Head Posture.")
-                else:
-                    st.success("🟢 Good Posture!")
-
-            except:
-                st.error("Analysis failed.")
-        else:
-            st.error("Person not found.")
-
-
+    st.header("Upload Photo Diagnosis (Disabled in Calibration Mode)")
+    st.info(
+        "This prototype focuses on **real-time calibrated analysis**.\n\n"
+        "Please use the **Real-time (Calibrated)** tab to analyze your posture "
+        "relative to your own best baseline."
+    )
 
 
