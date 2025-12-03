@@ -89,44 +89,31 @@ mp_pose = mp.solutions.pose
 
 
 # --- Distance → Probabilities (Good / Mild / Severe) ---
-def distance_to_probs(distance, t_good=0.12, t_mild=0.28):
+# --- Distance → Probabilities (Good / Mild / Severe) ---
+def distance_to_probs(distance):
     """
     Map distance from baseline to probabilities for good/mild/severe.
-    t_good: below this, mostly 'good'
-    t_mild: above this, starts to become 'severe'
+
+    - d <= GOOD_MAX          → mostly GOOD
+    - GOOD_MAX < d <= MILD_MAX → narrow band for MILD
+    - d > MILD_MAX           → mostly SEVERE
     """
     d = float(distance)
 
-    # Good score decreases as distance grows
-    good_score = max(0.0, 1.0 - d / max(t_good, 1e-6))
+    # Tunable thresholds
+    GOOD_MAX = 0.13   # below this → usually GOOD
+    MILD_MAX = 0.22   # above this → usually SEVERE
 
-    # Mild score is high in the middle band
-    if d <= t_good:
-        mild_score = d / max(t_good, 1e-6)
-    elif d <= t_mild:
-        mild_score = 1.0 - (d - t_good) / max(t_mild - t_good, 1e-6)
-    else:
-        mild_score = 0.0
+    # 1) Very close to baseline → GOOD-dominant
+    if d <= GOOD_MAX:
+        return {"good": 0.85, "mild": 0.13, "severe": 0.02}
 
-    # Severe score increases after t_mild
-    if d <= t_mild:
-        severe_score = 0.0
-    else:
-        severe_score = min(1.0, (d - t_mild) / max(t_mild, 1e-6))
+    # 2) Narrow middle band → MILD-dominant
+    if d <= MILD_MAX:
+        return {"good": 0.15, "mild": 0.70, "severe": 0.15}
 
-    scores = {
-        "good": good_score,
-        "mild": mild_score,
-        "severe": severe_score,
-    }
-    total = sum(scores.values())
-    if total <= 0:
-        return {"good": 1/3, "mild": 1/3, "severe": 1/3}
-
-    for k in scores:
-        scores[k] /= total
-
-    return scores
+    # 3) Clearly far from baseline → SEVERE-dominant
+    return {"good": 0.05, "mild": 0.15, "severe": 0.80}
 
 
 # --- Feature extraction (same logic as training) ---
@@ -409,3 +396,4 @@ if ctx and ctx.state.playing:
                 sound_ph.empty()
 
         time.sleep(0.1)
+
