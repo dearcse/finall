@@ -154,13 +154,13 @@ with tab1:
             )
 
         with col2:
-    st.subheader("Live Status")
-    status_text_ph = st.empty()
-    
-    st.write("**Prediction Confidence:**")
-    
-    # 3개의 column으로 나눠서 각자 bar placeholder 하나씩만 생성
-    col_good, col_mild, col_severe = st.columns(3)
+            st.subheader("Live Status")
+            status_text_ph = st.empty()
+            
+            st.write("**Prediction Confidence:**")
+            
+            # 3개의 column으로 나눠서 각자 bar placeholder 하나씩만 생성
+            col_good, col_mild, col_severe = st.columns(3)
 
     with col_good:
         st.markdown(
@@ -286,5 +286,6 @@ with tab2:
                 st.error("Analysis failed.")
         else:
             st.error("Person not found.")
+
 
 
